@@ -13,11 +13,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/lastseen \
-    -listen :9000 \
-    -token CHANGE_ME \
-    -monitors atsos \
-    -grace 15m
+# Everything except the credentials lives in the config that `lastseen init`
+# wrote, so the secret is never an argument here: process arguments are world
+# readable through ps.
+ExecStart=/usr/local/bin/lastseen run -config /etc/lastseen.conf
 User=lastseen
 Group=lastseen
 

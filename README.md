@@ -26,28 +26,58 @@ is one you learn to ignore, and then it is worth nothing on the day it counts.
 Nothing is ever sent to the watched machines. The only inbound surface is one
 secret path per monitor, and every other request is a 404.
 
-## Run it
+## Set it up
 
-```sh
-BOT_TOKEN=... CHAT_ID=... lastseen \
-  -listen :9000 \
-  -token $(head -c 24 /dev/urandom | base64 | tr -d '/+=') \
-  -monitors atsos,nas,backup \
-  -grace 15m
+`init` generates the secret and works out the address, so nothing has to be
+typed by hand and then retyped on every client:
+
+```
+$ lastseen init -monitors atsos,nas,backup
+wrote /etc/lastseen.conf
+
+atsos                    http://192.168.1.99:9000/ping/K7fQ…/atsos
+nas                      http://192.168.1.99:9000/ping/K7fQ…/nas
+backup                   http://192.168.1.99:9000/ping/K7fQ…/backup
+(status page)            http://192.168.1.99:9000/status/K7fQ…
+
+that address is private, so these urls only work from the same network.
+pass -advertise to publish something reachable from outside.
 ```
 
-Then point each thing at its own URL. Anything able to make an HTTP request
+The address comes from the route this host would take to the internet, which
+is right for a watchdog on the same network as the things it watches and
+wrong for anything beyond it. It cannot be worked out in general: the daemon
+knows what it binds, not what sits in front of it, and a host can reach the
+world by more than one path. When it is wrong, say so once:
+
+```sh
+lastseen init -monitors atsos,nas -advertise https://watch.example.com:9000
+```
+
+Print the lines again whenever you need them, and add a monitor without
+disturbing the secret every existing client already uses:
+
+```sh
+lastseen urls
+lastseen add nas2
+```
+
+`init` refuses to overwrite an existing config. Regenerating the secret would
+orphan every client still using the old one, and they would go quiet without
+anyone knowing why.
+
+Then point each thing at its own url. Anything able to make an HTTP request
 qualifies: a daemon, a cron job, the tail of a backup script.
 
 ```sh
-curl -sf https://watch.example.com:9000/ping/<secret>/nas
-*/5 * * * * curl -sf https://watch.example.com:9000/ping/<secret>/backup
+curl -sf http://192.168.1.99:9000/ping/K7fQ…/nas
+*/5 * * * * curl -sf http://192.168.1.99:9000/ping/K7fQ…/backup
 ```
 
 Ask who is alive at any time:
 
 ```
-$ curl -s https://watch.example.com:9000/status/<secret>
+$ curl -s http://192.168.1.99:9000/status/K7fQ…
 atsos                    ok      last seen 41s ago (2026-08-21T09:00:00Z)
 nas                      ok      last seen 1m12s ago (2026-08-21T08:58:49Z)
 backup                   SILENT  last seen 2h4m ago (2026-08-21T06:56:12Z)
@@ -98,6 +128,7 @@ install -m 0644 configs/lastseen.service /etc/systemd/system/
 printf 'BOT_TOKEN=...\nCHAT_ID=...\n' > /etc/lastseen.env
 chmod 600 /etc/lastseen.env
 
+lastseen init -monitors atsos,nas            # writes /etc/lastseen.conf, 0600
 systemctl daemon-reload && systemctl enable --now lastseen
 ```
 
