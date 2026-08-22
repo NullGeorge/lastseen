@@ -1,0 +1,80 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          check-latest: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: vet
+        run: go vet ./...
+
+      # The http handlers, the sweep loop and the state file are all touched
+      # from different goroutines, so the race detector earns its keep here.
+      - name: test
+        run: go test -race -covermode=atomic -coverprofile=cover.out ./...
+
+      - name: coverage
+        run: |
+          go tool cover -func=cover.out | tail -1
+          total=$(go tool cover -func=cover.out | awk '/^total:/ {print substr($3, 1, length($3)-1)}')
+          echo "total coverage: $total%"
+          awk -v got="$total" 'BEGIN {
+            if (got + 0 < 80) { printf "coverage %.1f%% is below the 80%% floor\n", got; exit 1 }
+          }'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: cover.out
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: build through the shipped Makefile
+        run: make build
+
+      - name: the binary reports the version it was stamped with
+        run: |
+          test -x dist/lastseen || { echo "dist/lastseen missing"; exit 1; }
+          docker run --rm -v "$PWD/dist:/d" alpine:3.22 /d/lastseen version
+
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A unit file systemd refuses is a deployment that fails at 3am.
+      - name: validate the systemd unit
+        run: |
+          systemd-analyze verify configs/lastseen.service || true
+          systemd-analyze security --offline=true configs/lastseen.service | tail -1
