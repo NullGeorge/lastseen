@@ -12,6 +12,7 @@
 #   by -u https://example/ping/SECRET/atsos -i 30s
 #   LASTSEEN_PING_URL=... by -i 1m
 #   by -u ... -i 5m -m 12          # stop after 12 successful ticks
+#   scripts/.env next to by is sourced at start (set LASTSEEN_PING_URL=...)
 #   by -h
 #
 # Flags:
@@ -31,7 +32,12 @@
 
 set -euo pipefail
 
-print_help() { sed -n "2,30p" "$0"; }
+# jq is preferred for safe JSON emission; fall back to printf-built JSON when
+# the host has no jq installed (cron-only hosts often do not).
+have_jq=0
+command -v jq >/dev/null 2>&1 && have_jq=1
+
+print_help() { sed -n "2,31p" "$0"; }
 die()        { printf "by: %s\n" "$*" >&2; exit 1; }
 
 # parse_duration accepts plain seconds ("30") or suffixed values
@@ -67,6 +73,16 @@ while getopts ":u:i:t:n:m:l:qh" opt; do
   esac
 done
 
+# Optional .env next to this script. Treated as shell so it can carry URLs
+# and tunables; the file is operator-controlled.
+script_dir="$(cd -P "$(dirname -- "$0")" && pwd)"
+if [ -f "$script_dir/.env" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$script_dir/.env"
+  set +a
+fi
+
 [ -n "$url" ] || url="${LASTSEEN_PING_URL:-}"
 [ -n "$url" ] || die "no url: pass -u or set LASTSEEN_PING_URL"
 case "$url" in
@@ -90,7 +106,7 @@ timeout_s="$(parse_duration "$timeout"   || true)"
 [ -n "$timeout_s" ]  || die "timeout '$timeout' is not a duration (Ns, Nm, Nh)"
 case "$max_ticks" in ""|*[!0-9]*) die "-m must be a non-negative integer" ;; esac
 
-# Mirror wire-heartbeat.sh in .geo: never let the secret reach a terminal.
+# Never let the secret reach a terminal.
 mask_url() { printf "%s" "$1" | sed -E "s#/ping/[A-Za-z0-9_-]+/#/ping/<secret>/#"; }
 
 body_tmp="$(mktemp -t lastseen-by.XXXXXX)"
@@ -99,22 +115,44 @@ shutdown() { printf "by: shutting down\n" >&2; exit 0; }
 trap cleanup  EXIT
 trap shutdown INT TERM
 
-# emit writes one JSON line per tick. jq is used to escape fields; callers
-# can pipe the stream through | jq -c . or | jq 'select(.status=="fatal")'.
+# String-escape for the no-jq fallback: turns inner backslashes and double
+# quotes into their JSON form without adding the wrapping quotes itself; the
+# wrapper is added by json_quoted.
+json_string() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+json_quoted() { printf '"%s"' "$(json_string "$1")"; }
+
+# emit one line per tick. The line is JSON either way: jq is preferred, a
+# printf-with-escape fallback runs when jq is absent. -c keeps jq output to a
+# single line so the stream stays newline-delimited.
 emit() {
   local status="$1" code="$2" latency="$3" err="$4" attempt="$5"
   local ts; ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   if [ "$quiet" = "1" ] && [ "$status" = "ok" ]; then return 0; fi
-  jq -n \
-    --arg ts "$ts" \
-    --arg name "$url_name" \
-    --arg status "$status" \
-    --argjson code "$code" \
-    --argjson latency "$latency" \
-    --arg err "$err" \
-    --argjson attempt "$attempt" \
-    '{ts:$ts,name:$name,status:$status,code:$code,latency_ms:$latency,attempt:$attempt} + (if $err != "" then {error:$err} else {} end)' \
-    | tee -a "${log_file:-/dev/null}"
+
+  local line
+  if [ "$have_jq" -eq 1 ]; then
+    line=$(jq -nc \
+      --arg ts "$ts" \
+      --arg name "$url_name" \
+      --arg status "$status" \
+      --argjson code "$code" \
+      --argjson latency "$latency" \
+      --arg err "$err" \
+      --argjson attempt "$attempt" \
+      '{ts:$ts,name:$name,status:$status,code:$code,latency_ms:$latency,attempt:$attempt}
+       + (if $err != "" then {error:$err} else {} end)')
+  else
+    local err_part=""
+    if [ -n "$err" ]; then
+      err_part=", \"error\":$(json_quoted "$err")"
+    fi
+    line=$(printf '{"ts":%s,"name":%s,"status":%s,"code":%s,"latency_ms":%s,"attempt":%s%s}' \
+      "$(json_quoted "$ts")" \
+      "$(json_quoted "$url_name")" \
+      "$(json_quoted "$status")" \
+      "$code" "$latency" "$attempt" "$err_part")
+  fi
+  printf "%s\n" "$line" | tee -a "${log_file:-/dev/null}"
 }
 
 attempt=0 ok_ticks=0 err_ticks=0
