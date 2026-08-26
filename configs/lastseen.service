@@ -1,0 +1,60 @@
+# A watchdog that needs no privileges: it listens on one high port, writes one
+# state file and talks to the Telegram API. Nothing else.
+#
+# One-time setup:
+#   useradd --system --user-group --no-create-home --shell /usr/sbin/nologin lastseen
+#   printf 'BOT_TOKEN=...\nCHAT_ID=...\n' > /etc/lastseen.env && chmod 600 /etc/lastseen.env
+
+[Unit]
+Description=lastseen dead-man switch
+Documentation=https://github.com/NullGeorge/lastseen
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Everything except the credentials lives in the config that `lastseen init`
+# wrote, so the secret is never an argument here: process arguments are world
+# readable through ps.
+ExecStart=/usr/local/bin/lastseen run -config /etc/lastseen.conf
+User=lastseen
+Group=lastseen
+
+# systemd reads this as root before dropping privileges, so the file can be
+# 0600 root:root and the token never reaches the process arguments, where ps
+# would show it to every user on the box.
+EnvironmentFile=/etc/lastseen.env
+
+# Creates /var/lib/lastseen, which is where the default -state path points.
+StateDirectory=lastseen
+UMask=0077
+
+# No capability is needed, so none is permitted and none can be regained.
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
