@@ -1,0 +1,178 @@
+#!/bin/bash
+# by - periodic liveness client for lastseen.
+#
+# Hits <advertise>/ping/<secret>/<name> on a timer and reports each result.
+# lastseen is a dead-man switch: any tick the server does not hear about
+# counts as silence, so the only acceptable outcome from the server is
+# "ok". A 404 means the name or the secret is wrong and pinging will save
+# nobody; the script stops on the first one. Transport errors are
+# transient: the next tick tries again, no exit.
+#
+# Usage:
+#   by -u https://example/ping/SECRET/atsos -i 30s
+#   LASTSEEN_PING_URL=... by -i 1m
+#   by -u ... -i 5m -m 12          # stop after 12 successful ticks
+#   by -h
+#
+# Flags:
+#   -u URL      full ping url; overrides $LASTSEEN_PING_URL
+#   -i INTERVAL gap between pings: Ns, Nm or Nh (default 30s)
+#   -t TIMEOUT  per-request timeout, same units (default 5s)
+#   -n NAME     monitor name for an early check against the url
+#   -m COUNT    stop after COUNT successful ticks (default 0 = forever)
+#   -l FILE     append one JSON line per tick (default stdout)
+#   -q          quiet: only log non-ok results
+#   -h          this help
+#
+# Exit:
+#   0 clean termination: signal, -m reached with all ticks ok
+#   1 a 4xx was returned; the url is wrong, fix it
+#   2 the run ended after -m with at least one transient error
+
+set -euo pipefail
+
+print_help() { sed -n "2,30p" "$0"; }
+die()        { printf "by: %s\n" "$*" >&2; exit 1; }
+
+# parse_duration accepts plain seconds ("30") or suffixed values
+# ("30s", "5m", "1h"). Empty or nonsense input returns 1 so the caller can
+# produce its own error message.
+parse_duration() {
+  local raw="$1" seconds=""
+  case "$raw" in
+    ""|*[!0-9smh]*) return 1 ;;
+    *h) seconds=$(( ${raw%h} * 3600 )) ;;
+    *m) seconds=$(( ${raw%m} * 60 )) ;;
+    *s) seconds="${raw%s}" ;;
+    *)  seconds="$raw" ;;
+  esac
+  [ "$seconds" -gt 0 ] || return 1
+  printf "%s" "$seconds"
+}
+
+url="" interval="30s" timeout="5" name="" max_ticks="0" log_file="" quiet="0"
+
+while getopts ":u:i:t:n:m:l:qh" opt; do
+  case "$opt" in
+    u) url="$OPTARG" ;;
+    i) interval="$OPTARG" ;;
+    t) timeout="$OPTARG" ;;
+    n) name="$OPTARG" ;;
+    m) max_ticks="$OPTARG" ;;
+    l) log_file="$OPTARG" ;;
+    q) quiet="1" ;;
+    h) print_help; exit 0 ;;
+    :) die "missing value for -$OPTARG" ;;
+    \?) die "unknown flag -$OPTARG (try -h)" ;;
+  esac
+done
+
+[ -n "$url" ] || url="${LASTSEEN_PING_URL:-}"
+[ -n "$url" ] || die "no url: pass -u or set LASTSEEN_PING_URL"
+case "$url" in
+  */ping/*) ;;
+  *) die "url does not match advertise/ping/<secret>/<name>" ;;
+esac
+
+# lastseen rejects names containing /, ?, #, %, space. Mirror the rule
+# here so a typo fails in five seconds, not in a /var/lib state file.
+url_name="${url##*/}"
+case "$url_name" in
+  */*|*'?'|*'#'*|*'%'*|*' '*) die "name '$url_name' cannot be a url segment" ;;
+esac
+if [ -n "$name" ] && [ "$name" != "$url_name" ]; then
+  die "name '$name' does not match the last path segment of the url"
+fi
+
+interval_s="$(parse_duration "$interval" || true)"
+[ -n "$interval_s" ] || die "interval '$interval' is not a duration (Ns, Nm, Nh)"
+timeout_s="$(parse_duration "$timeout"   || true)"
+[ -n "$timeout_s" ]  || die "timeout '$timeout' is not a duration (Ns, Nm, Nh)"
+case "$max_ticks" in ""|*[!0-9]*) die "-m must be a non-negative integer" ;; esac
+
+# Mirror wire-heartbeat.sh in .geo: never let the secret reach a terminal.
+mask_url() { printf "%s" "$1" | sed -E "s#/ping/[A-Za-z0-9_-]+/#/ping/<secret>/#"; }
+
+body_tmp="$(mktemp -t lastseen-by.XXXXXX)"
+cleanup()  { rm -f "${body_tmp:-}"; }
+shutdown() { printf "by: shutting down\n" >&2; exit 0; }
+trap cleanup  EXIT
+trap shutdown INT TERM
+
+# emit writes one JSON line per tick. jq is used to escape fields; callers
+# can pipe the stream through | jq -c . or | jq 'select(.status=="fatal")'.
+emit() {
+  local status="$1" code="$2" latency="$3" err="$4" attempt="$5"
+  local ts; ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if [ "$quiet" = "1" ] && [ "$status" = "ok" ]; then return 0; fi
+  jq -n \
+    --arg ts "$ts" \
+    --arg name "$url_name" \
+    --arg status "$status" \
+    --argjson code "$code" \
+    --argjson latency "$latency" \
+    --arg err "$err" \
+    --argjson attempt "$attempt" \
+    '{ts:$ts,name:$name,status:$status,code:$code,latency_ms:$latency,attempt:$attempt} + (if $err != "" then {error:$err} else {} end)' \
+    | tee -a "${log_file:-/dev/null}"
+}
+
+attempt=0 ok_ticks=0 err_ticks=0
+while :; do
+  attempt=$(( attempt + 1 ))
+  set +e
+  metrics=$(curl -sS --max-time "$timeout_s" \
+              -o "$body_tmp" \
+              -w '%{http_code}|%{time_total}' \
+              "$url")
+  curl_rc=$?
+  set -e
+
+  if [ "$curl_rc" -ne 0 ]; then
+    err_ticks=$(( err_ticks + 1 ))
+    emit error 0 0 "curl:$curl_rc" "$attempt" >&2
+    sleep "$interval_s" || exit 0
+    continue
+  fi
+
+  code="${metrics%%|*}"
+  latency_s="${metrics#*|}"
+  latency_ms=$(awk -v s="$latency_s" 'BEGIN{printf "%d", s * 1000 + 0.5}')
+  body="$(cat "$body_tmp")"
+
+  case "$code" in
+    2*)
+      if [ "$body" = "ok" ]; then
+        ok_ticks=$(( ok_ticks + 1 ))
+        emit ok "$code" "$latency_ms" "" "$attempt"
+      else
+        err_ticks=$(( err_ticks + 1 ))
+        emit error "$code" "$latency_ms" "unexpected-body" "$attempt" >&2
+      fi
+      ;;
+    4*)
+      err_ticks=$(( err_ticks + 1 ))
+      emit fatal "$code" "$latency_ms" "" "$attempt" >&2
+      printf "by: server refused %s with %s; check the url\n" \
+        "$(mask_url "$url")" "$code" >&2
+      exit 1
+      ;;
+    5*|000)
+      err_ticks=$(( err_ticks + 1 ))
+      emit error "$code" "$latency_ms" "server-$code" "$attempt" >&2
+      ;;
+    *)
+      err_ticks=$(( err_ticks + 1 ))
+      emit error "$code" "$latency_ms" "unexpected-code" "$attempt" >&2
+      ;;
+  esac
+
+  [ "$max_ticks" -gt 0 ] && [ "$ok_ticks" -ge "$max_ticks" ] && break
+  sleep "$interval_s" || exit 0
+done
+
+{
+  printf "by: %d ticks ok, %d errors, last url %s\n" \
+    "$ok_ticks" "$err_ticks" "$(mask_url "$url")"
+} >&2
+[ "$err_ticks" -eq 0 ]
