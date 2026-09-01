@@ -1,0 +1,4 @@
+dist/
+cover.out
+.env
+.git/

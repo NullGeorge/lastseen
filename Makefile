@@ -1,4 +1,4 @@
-.PHONY: build test docker-build docker-test clean version
+.PHONY: build docker-test clean version
 
 IMAGE ?= lastseen:dev
 DIST ?= dist
@@ -17,13 +17,10 @@ build:
 version:
 	@echo "$(VERSION) (commit $(COMMIT), $(DATE))"
 
-# Run the test suite inside the same Docker toolchain, no local Go needed.
-test:
-	docker run --rm -v "$(PWD):/src" -w /src golang:1.24-alpine go test ./...
-
-docker-build:
-	docker build $(STAMP) -t $(IMAGE) .
-
+# Run the test suite in the toolchain the binary is built with, no local Go
+# needed. The source reaches the container through the build context rather
+# than a bind mount: a mount resolves against whatever the daemon can see,
+# and one stale path is enough to test a tree that is not this one.
 docker-test:
 	docker build --target build -t $(IMAGE)-build .
 	docker run --rm $(IMAGE)-build go test ./...
