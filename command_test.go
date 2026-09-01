@@ -95,18 +95,33 @@ func TestClockIsMoscowAndDatesOnlyOlderDays(t *testing.T) {
 		at   time.Time
 		want string
 	}{
-		{"same day, utc input", time.Date(2026, 8, 23, 9, 34, 0, 0, time.UTC), "12:34"},
-		{"same day, another zone", time.Date(2026, 8, 23, 4, 34, 0, 0, time.FixedZone("EST", -5*3600)), "12:34"},
-		{"earlier today, before msk midnight offset", time.Date(2026, 8, 23, 0, 5, 0, 0, time.UTC), "03:05"},
-		{"yesterday in moscow", time.Date(2026, 8, 22, 20, 15, 0, 0, time.UTC), "22.08 23:15"},
-		{"last month", time.Date(2026, 7, 2, 6, 0, 0, 0, time.UTC), "02.07 09:00"},
+		{"same day, utc input", time.Date(2026, 8, 23, 9, 34, 0, 0, time.UTC), "12:34:00"},
+		{"same day, another zone", time.Date(2026, 8, 23, 4, 34, 7, 0, time.FixedZone("EST", -5*3600)), "12:34:07"},
+		{"earlier today, before msk midnight offset", time.Date(2026, 8, 23, 0, 5, 0, 0, time.UTC), "03:05:00"},
+		{"yesterday in moscow", time.Date(2026, 8, 22, 20, 15, 41, 0, time.UTC), "22.08 23:15:41"},
+		{"last month", time.Date(2026, 7, 2, 6, 0, 0, 0, time.UTC), "02.07 09:00:00"},
 		// 21:05 UTC is already the next day in Moscow, so it is not "today".
-		{"tonight utc is tomorrow in moscow", time.Date(2026, 8, 23, 21, 5, 0, 0, time.UTC), "24.08 00:05"},
+		{"tonight utc is tomorrow in moscow", time.Date(2026, 8, 23, 21, 5, 0, 0, time.UTC), "24.08 00:05:00"},
 	}
 	for _, testCase := range cases {
 		if got := clock(testCase.at, now); got != testCase.want {
 			t.Errorf("%s: clock = %q, want %q", testCase.name, got, testCase.want)
 		}
+	}
+}
+
+// Two things on the same schedule check in inside the same minute. The reply
+// has to tell them apart: that is the whole reason the seconds are printed.
+func TestClockSeparatesCheckInsInTheSameMinute(t *testing.T) {
+	now := time.Date(2026, 8, 23, 9, 40, 0, 0, time.UTC)
+	first := clock(time.Date(2026, 8, 23, 9, 35, 1, 0, time.UTC), now)
+	second := clock(time.Date(2026, 8, 23, 9, 35, 44, 0, time.UTC), now)
+
+	if first == second {
+		t.Fatalf("two check-ins 43s apart both render as %q", first)
+	}
+	if first != "12:35:01" || second != "12:35:44" {
+		t.Errorf("clock = %q and %q, want %q and %q", first, second, "12:35:01", "12:35:44")
 	}
 }
 
@@ -117,7 +132,7 @@ func TestStatusTextRendersEveryMonitor(t *testing.T) {
 		{Name: "nas", LastSeen: now.Add(-26 * time.Hour), SinceSeen: 26 * time.Hour, Silent: true},
 	}
 
-	want := "atsos: 12 минут назад (12:28)\nnas: 1 день назад (22.08 10:40) — тишина"
+	want := "atsos: 12 минут назад (12:28:00)\nnas: 1 день назад (22.08 10:40:00) — тишина"
 	if got := statusText(lines, now); got != want {
 		t.Errorf("statusText =\n%q\nwant\n%q", got, want)
 	}

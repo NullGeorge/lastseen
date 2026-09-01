@@ -114,14 +114,19 @@ func statusText(lines []report, now time.Time) string {
 	return text.String()
 }
 
-// clock prints the moment itself. The date is added only when it is not today,
-// because "12:34" is unambiguous for today and misleading for last Tuesday.
+// clock prints the moment itself, to the second. The date is added only when
+// it is not today, because "12:34:56" is unambiguous for today and misleading
+// for last Tuesday.
+//
+// Seconds are not decoration: two things on the same schedule land in the same
+// minute, and a reply that stops at the minute reads as one check-in when it
+// was really two.
 func clock(at, now time.Time) string {
 	local := at.In(moscow)
 	if today := now.In(moscow); local.YearDay() == today.YearDay() && local.Year() == today.Year() {
-		return local.Format("15:04")
+		return local.Format("15:04:05")
 	}
-	return local.Format("02.01 15:04")
+	return local.Format("02.01 15:04:05")
 }
 
 // ago renders a gap in the largest unit that still says something useful.

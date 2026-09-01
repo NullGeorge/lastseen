@@ -87,12 +87,14 @@ Or ask in the chat, which is where you already are when the thought occurs.
 Start it with `-commands` and send `/status` to the bot:
 
 ```
-atsos: 12 минут назад (12:34)
-nas: 1 день назад (22.08 10:40) — тишина
+atsos: 12 минут назад (12:34:07)
+nas: 1 день назад (22.08 10:40:51) — тишина
 ```
 
 Times are Moscow, whatever zone the watchdog runs in, and the date is shown
-only when the moment was not today. The reply is read only: there is no
+only when the moment was not today. Seconds are shown because two things on
+the same schedule check in inside the same minute, and a reply that stopped at
+the minute made one moment out of two. The reply is read only: there is no
 command that changes anything, and only the chat that receives the alerts is
 answered at all. Anyone else gets no reply, so probing the bot teaches nothing.
 
